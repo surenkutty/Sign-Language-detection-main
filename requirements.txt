@@ -1,5 +1,5 @@
-numpy
-pandas
-tensorflow
-mediapipe
 opencv-python
+cvzone
+mediapipe
+tensorflow
+numpy

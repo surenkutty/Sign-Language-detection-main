@@ -1,75 +1,130 @@
+#!/usr/bin/env python3
+"""
+Real-Time Sign Language Gesture Recognition
+
+Uses MediaPipe to detect the hand from your webcam, processes the image,
+and predicts the gesture using a trained TensorFlow model.
+Press "q" to exit.
+"""
+
 import cv2
-from cvzone.HandTrackingModule import HandDetector
+import mediapipe as mp
 import tensorflow as tf
 import numpy as np
-import math
 
-# Load the trained model
-model = tf.keras.models.load_model("./Model/keras_model.h5")
+def custom_depthwise_conv2d(*args, **kwargs):
+    # Remove 'groups' parameter if present, as it's not needed
+    kwargs.pop('groups', None)
+    return tf.keras.layers.DepthwiseConv2D(*args, **kwargs)
 
-# Read labels
-with open("./Model/labels.txt", "r") as f:
-    labels = [line.strip() for line in f.readlines()]
+def main():
+    # Load the trained model and labels
+    model_path = "./Model/keras_model.h5"
+    labels_path = "./Model/labels.txt"
+    
+    try:
+        model = tf.keras.models.load_model(model_path, custom_objects={'DepthwiseConv2D': custom_depthwise_conv2d})
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        return
 
-# Open webcam
-cap = cv2.VideoCapture(0)
-detector = HandDetector(maxHands=1)
+    try:
+        with open(labels_path, "r") as f:
+            labels = [line.strip() for line in f.readlines()]
+    except Exception as e:
+        print(f"Error loading labels: {e}")
+        return
 
-# Settings
-offset = 20
-imgSize = 300
+    # Initialize webcam
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Could not open webcam.")
+        return
 
-while True:
-    success, img = cap.read()
-    imgOutput = img.copy()
-    hands, img = detector.findHands(img)
+    # Initialize MediaPipe Hands
+    mp_hands = mp.solutions.hands
+    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.7)
+    mp_draw = mp.solutions.drawing_utils
 
-    if hands:
-        hand = hands[0]
-        x, y, w, h = hand['bbox']
+    offset = 20  # Padding around detected hand
+    imgSize = 300  # Size of intermediate processed image
 
-        # Ensure the hand is within bounds
-        if y - offset >= 0 and y + h + offset <= img.shape[0] and x - offset >= 0 and x + w + offset <= img.shape[1]:
-            imgWhite = np.ones((imgSize, imgSize, 3), np.uint8) * 255
-            imgCrop = img[y - offset:y + h + offset, x - offset:x + w + offset]
-            aspectRatio = h / w
+    print("Sign language detection started. Press 'q' to quit.")
 
-            # Resize maintaining aspect ratio
-            if aspectRatio > 1:
-                k = imgSize / h
-                wCal = math.ceil(k * w)
-                imgResize = cv2.resize(imgCrop, (wCal, imgSize))
-                wGap = math.ceil((imgSize - wCal) / 2)
-                imgWhite[:, wGap: wGap + wCal] = imgResize
-            else:
-                k = imgSize / w
-                hCal = math.ceil(k * h)
-                imgResize = cv2.resize(imgCrop, (imgSize, hCal))
-                hGap = math.ceil((imgSize - hCal) / 2)
-                imgWhite[hGap: hGap + hCal, :] = imgResize
+    while True:
+        success, img = cap.read()
+        if not success:
+            print("Error: Could not read frame from webcam.")
+            break
 
-            # Preprocess the image for the model
-            imgWhite = cv2.resize(imgWhite, (224, 224))  # Ensure it matches model input size
-            imgWhite = np.expand_dims(imgWhite, axis=0) / 255.0  # Normalize
+        # Convert image to RGB for MediaPipe
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = hands.process(img_rgb)
 
-            # Make prediction
-            prediction = model.predict(imgWhite)
-            index = np.argmax(prediction)
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                # Optionally draw landmarks on the image
+                mp_draw.draw_landmarks(img, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-            # Display results
-            label = labels[index]
-            print(f"Detected: {label}")
+                # Determine the bounding box of the hand
+                h, w, _ = img.shape
+                x_min, y_min = w, h
+                x_max, y_max = 0, 0
+                for lm in hand_landmarks.landmark:
+                    x, y = int(lm.x * w), int(lm.y * h)
+                    x_min = min(x, x_min)
+                    y_min = min(y, y_min)
+                    x_max = max(x, x_max)
+                    y_max = max(y, y_max)
 
-            cv2.rectangle(imgOutput, (x - offset, y - offset - 70), (x - offset + 400, y - offset + 60 - 50), (0, 255, 0), cv2.FILLED)
-            cv2.putText(imgOutput, label, (x, y - 30), cv2.FONT_HERSHEY_COMPLEX, 2, (0, 0, 0), 2)
-            cv2.rectangle(imgOutput, (x - offset, y - offset), (x + w + offset, y + h + offset), (0, 255, 0), 4)
+                # Apply offset to bounding box
+                x_min = max(x_min - offset, 0)
+                y_min = max(y_min - offset, 0)
+                x_max = min(x_max + offset, w)
+                y_max = min(y_max + offset, h)
 
-            cv2.imshow('ImageCrop', imgCrop)
-            cv2.imshow('ImageWhite', imgWhite)
+                # Crop the hand region and prepare a white background image
+                imgCrop = img[y_min:y_max, x_min:x_max]
+                imgWhite = np.ones((imgSize, imgSize, 3), np.uint8) * 255
 
-    cv2.imshow('Image', imgOutput)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+                # Resize the cropped image while preserving aspect ratio
+                handWidth = x_max - x_min
+                handHeight = y_max - y_min
+                aspectRatio = handHeight / handWidth
 
-cap.release()
-cv2.destroyAllWindows()
+                if aspectRatio > 1:
+                    k = imgSize / handHeight
+                    newWidth = int(k * handWidth)
+                    imgResize = cv2.resize(imgCrop, (newWidth, imgSize))
+                    wGap = (imgSize - newWidth) // 2
+                    imgWhite[:, wGap:wGap + newWidth] = imgResize
+                else:
+                    k = imgSize / handWidth
+                    newHeight = int(k * handHeight)
+                    imgResize = cv2.resize(imgCrop, (imgSize, newHeight))
+                    hGap = (imgSize - newHeight) // 2
+                    imgWhite[hGap:hGap + newHeight, :] = imgResize
+
+                # Preprocess for model input: resize to 224x224 and normalize pixel values
+                img_input = cv2.resize(imgWhite, (224, 224))
+                img_input = np.expand_dims(img_input, axis=0) / 255.0
+
+                # Get model prediction
+                prediction = model.predict(img_input)
+                index = np.argmax(prediction)
+                label = labels[index] if index < len(labels) else "Unknown"
+
+                # Display prediction and bounding box on the original image
+                cv2.putText(img, label, (x_min, y_min - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+                cv2.rectangle(img, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+
+        cv2.imshow("Sign Language Detection", img)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
