@@ -19,8 +19,8 @@ def custom_depthwise_conv2d(*args, **kwargs):
 
 def main():
     # Load the trained model and labels
-    model_path = "./Model/keras_model.h5"
-    labels_path = "./Model/labels.txt"
+    model_path = "./Asl-model/asl_model.h5"
+    labels_path = "./Asl-model/lasl_abels.json"
     
     try:
         model = tf.keras.models.load_model(model_path, custom_objects={'DepthwiseConv2D': custom_depthwise_conv2d})
